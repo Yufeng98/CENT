@@ -103,7 +103,12 @@ RV_SFT_CYCLE_SINGLE = 16.00 * SB_WR_CYCLE + 2.00 + 1.00 * SB_RD_CYCLE
 # latency of pipelining 32 accelerators
 # each having 16 SIMD lanes
 ACCEL_CYCLE = { "EXP": CH_PER_DV * SB_RD_CYCLE + EXP_LANE_CYCLE + SB_WR_CYCLE,
-                "VEC": CH_PER_DV * 2.00 * SB_RD_CYCLE + 1.00 + SB_WR_CYCLE}
+                "VEC": CH_PER_DV * 2.00 * SB_RD_CYCLE + 1.00 + SB_WR_CYCLE,
+                "COPY_BK_GB": 43,   # Cycles to copy Bank -> Global Buffer
+                "COPY_GB_BK": 46,   # Cycles to copy Global Buffer -> Bank
+                "MAC_BK_GB": 49,    # Cycles for MAC (Bank * Global Buffer)
+                "PERMUTE_GB": 2     # Cycles for the shuffle logic
+                }
 
 # GB: Global Buffer
 # SB: Shared Buffer

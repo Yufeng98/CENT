@@ -72,6 +72,7 @@ class PIM():
             "WR_BIAS": 0,
             "RD_SBK": 0,
             "WR_SBK": 0,
+            "MULINT": 0, #NEW
             "breakdown_sa_pow": 0,
             "breakdown_sa_weight": 0,
             "breakdown_sa_score": 0,
@@ -94,6 +95,7 @@ class PIM():
             "WR_BIAS": 37.5,
             "RD_SBK": 30.5,
             "WR_SBK": 45.5,
+            "MULINT": 8, #NEW
         }
 
     def hex_channel_mask(self, channel):
@@ -390,4 +392,50 @@ class PIM():
                 B[0][0][i*self.DRAM_column:(i+1)*self.DRAM_column]) for i in range(n-1)]
         lst.append(self.Vector_Vector_EWADD_Row(A[0][0][(n-1)*self.DRAM_column:], B[0][0][(n-1)*self.DRAM_column:]))
         return torch.cat(lst).reshape(A.shape)
-    
+        
+    def PERMUTE_GB(self, dimm, channel, utilized_channels, col_index, op_size, op_trace):
+        """
+        Simulates swapping adjacent pairs in the Global Buffer: [x1, x2] -> [-x2, x1]
+        This assumes the Global Buffer has a simple shuffle network.
+        """
+        # 1. Update Timing Stats
+        # Permutation is purely logic, usually fast (1-2 cycles). 
+        # We can reuse a cheap timing constant or define a new one.
+        PERMUTE_COST = 2 # cycles
+        self.time["MAC_BK_GB"] += PERMUTE_COST # attributing to logic time
+        
+        if op_trace and dimm == 0:
+            channel_multi_transformer_block_required = self.num_channels // utilized_channels * utilized_channels
+            channel_lst = [channel for channel in range(channel_multi_transformer_block_required)]
+            # Write a new trace entry for debug
+            self.file.write("AiM PERMUTE_GB {} {}\n".format(op_size, self.hex_channel_mask(channel_lst)))
+
+        # 2. Perform the Swap Logic (Functional Simulation)
+        # Assuming data is in GB. We need to handle the PyTorch tensor.
+        gb_data = self.pim_device["dimm_" + str(dimm)].dimm["channel_" + str(channel)].GB
+        
+        # Extract the vector
+        vector = gb_data[col_index : col_index + op_size * self.burst_length]
+        
+        # Reshape to pairs to handle the swap
+        # Shape: (N/2, 2)
+        pairs = vector.view(-1, 2)
+        
+        # Swap: [x, y] -> [-y, x]
+        # column 0 gets -1 * column 1
+        # column 1 gets column 0
+        swapped = torch.stack((-1 * pairs[:, 1], pairs[:, 0]), dim=1).view(-1)
+        
+        # Write back to GB
+        self.pim_device["dimm_" + str(dimm)].dimm["channel_" + str(channel)].GB[col_index : col_index + op_size * self.burst_length] = swapped
+        
+    def MULINT_only_trace(self, channel, op_size):
+        """
+        Executes the in-memory shuffle network (MIN) to pair (a,b) elements 
+        into complex numbers directly within the Global Buffer.
+        """
+        # Track the time based on the base hardware latency plus the operation size
+        self.time["MULINT"] += self.timing_constant["MULINT"] + op_size
+        
+        # Write the trace instruction. Format: "AiM MULINT <op_size> <channel_mask> <dummy_row>"
+        self.file.write("AiM ISR_MIN {} {} 0\n".format(op_size, self.hex_channel_mask(channel)))

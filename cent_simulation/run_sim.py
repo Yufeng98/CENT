@@ -178,7 +178,41 @@ def calculate_acc_latency(args, seqlen):
     latency["Softmax_latency"] += n_heads[args.model] * 1.00 * SB_RD_CYCLE                                     # HEAD RED
     latency["Softmax_latency"] += n_heads[args.model] * RV_SFT_CYCLE_PIPELINE                                  # HEAD RISCV
     latency["Softmax_latency"] = float(latency["Softmax_latency"]) / float(FREQ / KILO)
-    latency["RotEmbed_latency"] = embedding_size[args.model] * RV_ROTEmbed_CYCLE                                 # EMB RISCV
+    
+    #latency["RotEmbed_latency"] = embedding_size[args.model] * RV_ROTEmbed_CYCLE                                 # EMB RISCV
+    #latency["RotEmbed_latency"] = float(GQA_factor * latency["RotEmbed_latency"]) / float(FREQ / KILO)
+    
+# --- NEW WAY (PIM) ---
+    # We execute RoPE as a sequence of PIM commands:
+    # 1. READ x from Bank -> GB (COPY_BK_GB)
+    # 2. EWMUL (x * cos) -> Latch (MAC_BK_GB or EWMUL)
+    # 3. PERMUTE GB (x -> x_swap)
+    # 4. MAC (x_swap * sin) + Latch -> Latch
+    # 5. WRITE Latch -> Bank (COPY_GB_BK or WR_SBK)
+    
+    # Cost per element (vectorized):
+    # PIM operations are parallel across banks. 
+    # The time is determined by: (Embedding_Size / Num_Banks / Bus_Width) * Cycles
+    
+    # 1. Load X to Global Buffer
+    t_load = ACCEL_CYCLE["COPY_BK_GB"] 
+    # 2. Multiply X * Cos (Assume Cos is stored in Bank)
+    t_mul_cos = ACCEL_CYCLE["MAC_BK_GB"] # or EWMUL
+    # 3. Permute GB
+    t_permute = 2 # Fast logic cycle
+    # 4. Multiply X_swap * Sin and Accumulate
+    t_mul_sin = ACCEL_CYCLE["MAC_BK_GB"]
+    # 5. Write back
+    t_write = ACCEL_CYCLE["COPY_GB_BK"]
+
+    total_cycles = t_load + t_mul_cos + t_permute + t_mul_sin + t_write
+    
+    # How many "vectors" do we process?
+    # Total Embedding Size / (Channels * Banks * Data_Width_Per_Clock)
+    # Assuming full utilization of all banks:
+    vectors_per_pass = embedding_size[args.model] / (args.num_channels * 16.0) # 16 is example vector width
+
+    latency["RotEmbed_latency"] = vectors_per_pass * total_cycles
     latency["RotEmbed_latency"] = float(GQA_factor * latency["RotEmbed_latency"]) / float(FREQ / KILO)
     return latency
 
