@@ -1255,3 +1255,66 @@ class TransformerBlock(PIM):
                             break
                         for tb in range(num_transformer_blocks_per_device):
                             self.R_MEM_only_trace(channel_index + channels_required_all_devices * tb, bank_index, row_index + row * self.DRAM_column, self.burst_length)
+                            
+                            
+                            
+    def apply_rotary_emb_pim_only_trace(self, row_index_xq, row_index_xk, op_trace_input):
+        """
+        Executes Rotary Positional Embedding entirely within the PIM channels.
+        Replaces the legacy PNM formatting by utilizing the Global Buffer MIN.
+        """
+        if not op_trace_input:
+            return
+
+        # Calculate operation size based on head dimension and bus width
+        base_op_size = self.head_dim // self.burst_length
+        channels_utilized = self.channels_per_block
+        channel_lst = [channel for channel in range(channels_utilized)]
+        
+        is_decode = (self.seqlen == 1)
+        op_size_xq = base_op_size if is_decode else base_op_size * self.seqlen
+
+        # GQA - Keys only exist for n_kv_heads. 
+        # Calculate the number of banks holding KV heads based on n_repeat
+        kv_banks = self.num_banks // self.n_repeat if self.GQA else self.num_banks
+        op_size_xk = base_op_size if is_decode else base_op_size * self.seqlen
+        
+        
+        # Rotate the Query Vectors (xq)
+        for bank in range(self.num_banks):
+            # unformatted real numbers (a, b, c, d) to the Global Buffer
+            self.COPY_BK_GB_only_trace(channel_lst, bank, row_index_xq, op_size_xq)
+            
+            # use 256x256 MIN to cross wires and form (a+jb) pairs
+            # This triggers the strict 8-cycle tSHUFFLE hardware delay in Ramulator
+            self.MULINT_only_trace(channel_lst, op_size_xq)
+            
+            # write the aligned complex pairs back to bank
+            self.COPY_GB_BK_only_trace(channel_lst, bank, row_index_xq, op_size_xq)
+            
+            # complex multiplication against pre-loaded freqs_cis weights
+            # (Assuming EWMUL is mapped to operate on the target bank group)
+            self.EWMUL_only_trace(channel_lst, row_index_xq, op_size_xq)
+
+        # Rotate the Key Vectors (xk)
+        for bank in range(kv_banks):
+            self.COPY_BK_GB_only_trace(channel_lst, bank, row_index_xk, op_size_xk)
+            self.MULINT_only_trace(channel_lst, op_size_xk)
+            self.COPY_GB_BK_only_trace(channel_lst, bank, row_index_xk, op_size_xk)
+            self.EWMUL_only_trace(channel_lst, row_index_xk, op_size_xk)
+
+
+        # Inverse Shuffle
+        # Q Vectors Inverse
+        for bank in range(self.num_banks):
+            self.COPY_BK_GB_only_trace(channel_lst, bank, row_index_xq, op_size_xq)
+            self.time["MULINT"] += self.timing_constant["MULINT"] + op_size_xq
+            self.file.write("AiM MULINT {} {} 0\n".format(op_size_xq, self.hex_channel_mask(channel_lst)))
+            self.COPY_GB_BK_only_trace(channel_lst, bank, row_index_xq, op_size_xq)
+
+        # K Vectors Inverse (Using GQA kv_banks)
+        for bank in range(kv_banks):
+            self.COPY_BK_GB_only_trace(channel_lst, bank, row_index_xk, op_size_xk)
+            self.time["MULINT"] += self.timing_constant["MULINT"] + op_size_xk
+            self.file.write("AiM MULINT {} {} 0\n".format(op_size_xk, self.hex_channel_mask(channel_lst)))
+            self.COPY_GB_BK_only_trace(channel_lst, bank, row_index_xk, op_size_xk)
